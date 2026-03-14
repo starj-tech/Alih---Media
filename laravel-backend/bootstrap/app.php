@@ -29,6 +29,12 @@ foreach ($requiredDirectories as $directory) {
 
 $app = new Illuminate\Foundation\Application($basePath);
 
+// Fallback untuk shared hosting: jika file .env tidak ada / tidak bisa dibaca,
+// gunakan .env.example agar konfigurasi penting (SMTP, DB, dll) tetap ter-load.
+if ((!is_file($basePath . '/.env') || !is_readable($basePath . '/.env')) && is_readable($basePath . '/.env.example')) {
+    $app->loadEnvironmentFrom('.env.example');
+}
+
 /*
 |--------------------------------------------------------------------------
 | Bind Important Interfaces
