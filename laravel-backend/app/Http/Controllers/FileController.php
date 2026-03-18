@@ -19,12 +19,16 @@ class FileController extends Controller
         $type = $request->type;
 
         if ($type === 'sertifikat') {
-            if ($file->getMimeType() !== 'application/pdf') {
+            $allowedPdf = ['application/pdf', 'application/x-pdf', 'application/octet-stream'];
+            $ext = strtolower($file->getClientOriginalExtension());
+            if (!in_array($file->getMimeType(), $allowedPdf) && $ext !== 'pdf') {
                 return response()->json(['error' => 'File sertifikat harus berformat PDF'], 422);
             }
         } elseif (in_array($type, ['ktp', 'foto-bangunan'])) {
-            if (!in_array($file->getMimeType(), ['image/jpeg', 'image/jpg', 'image/pjpeg'])) {
-                return response()->json(['error' => 'File harus berformat JPG/JPEG'], 422);
+            $allowedImg = ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png'];
+            $ext = strtolower($file->getClientOriginalExtension());
+            if (!in_array($file->getMimeType(), $allowedImg) && !in_array($ext, ['jpg', 'jpeg', 'png'])) {
+                return response()->json(['error' => 'File harus berformat JPG/JPEG/PNG'], 422);
             }
         }
 
@@ -32,7 +36,14 @@ class FileController extends Controller
         $ext = $file->getClientOriginalExtension();
         $path = $user->id . '/' . $type . '/' . $timestamp . '.' . $ext;
 
-        Storage::disk('public')->putFileAs('', $file, $path);
+        try {
+            $stored = Storage::disk('public')->putFileAs('', $file, $path);
+            if (!$stored) {
+                return response()->json(['error' => 'Gagal menyimpan file ke storage. Periksa izin direktori server.'], 500);
+            }
+        } catch (\Exception $e) {
+            return response()->json(['error' => 'Gagal menyimpan file: ' . $e->getMessage()], 500);
+        }
 
         return response()->json([
             'path' => $path,

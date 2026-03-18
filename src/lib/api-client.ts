@@ -107,10 +107,79 @@ export async function apiUpload(
 ): Promise<any> {
   const token = getToken();
 
+  // Try XHR first for progress support, fall back to fetch on failure
+  try {
+    return await apiUploadXHR(endpoint, formData, token, onProgress);
+  } catch (xhrError: any) {
+    // If XHR fails with network/CORS error, try fetch as fallback
+    const isNetworkError = xhrError?.message?.includes('Koneksi terputus') || 
+                           xhrError?.message?.includes('network');
+    if (isNetworkError) {
+      console.warn('[API] XHR upload failed, trying fetch fallback:', xhrError.message);
+      return apiUploadFetch(endpoint, formData, token, onProgress);
+    }
+    throw xhrError;
+  }
+}
+
+async function apiUploadFetch(
+  endpoint: string,
+  formData: FormData,
+  token: string | null,
+  onProgress?: (percent: number) => void,
+): Promise<any> {
+  onProgress?.(10);
+  
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  let res: Response;
+  try {
+    res = await fetch(`${LARAVEL_API_URL}${endpoint}`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+  } catch (e) {
+    throw new Error('Tidak dapat terhubung ke server untuk upload. Periksa koneksi internet.');
+  }
+
+  onProgress?.(80);
+
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('text/html')) {
+    const htmlText = await res.text().catch(() => '');
+    console.error('[API] Upload fetch got HTML:', res.status, htmlText.substring(0, 200));
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Sesi tidak valid. Silakan login kembali.');
+    }
+    throw new Error(`Upload gagal: server error (${res.status}). Hubungi admin.`);
+  }
+
+  const data = await res.json().catch(() => ({ error: res.statusText }));
+
+  if (!res.ok) {
+    const msg = extractApiError(data, `Upload gagal (HTTP ${res.status})`);
+    throw new Error(msg);
+  }
+
+  onProgress?.(100);
+  return data;
+}
+
+function apiUploadXHR(
+  endpoint: string,
+  formData: FormData,
+  token: string | null,
+  onProgress?: (percent: number) => void,
+): Promise<any> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${LARAVEL_API_URL}${endpoint}`);
-    xhr.timeout = 60000;
+    xhr.timeout = 120000;
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -127,17 +196,21 @@ export async function apiUpload(
 
     xhr.onload = () => {
       const contentType = xhr.getResponseHeader('content-type') || '';
-      if (contentType.includes('text/html')) {
-        console.error('[API] Upload received HTML instead of JSON from:', endpoint, 'Status:', xhr.status);
-        reject(new Error(xhr.status === 401 || xhr.status === 403 ? 'Sesi tidak valid. Silakan login kembali.' : 'Server upload mengembalikan respons tidak valid.'));
-        return;
-      }
-
       let data: any = null;
+      
       try {
         data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
       } catch {
-        data = { error: xhr.statusText };
+        if (contentType.includes('text/html')) {
+          console.error('[API] Upload HTML response:', endpoint, xhr.status, xhr.responseText?.substring(0, 300));
+          reject(new Error(
+            xhr.status === 401 || xhr.status === 403
+              ? 'Sesi tidak valid. Silakan login kembali.'
+              : `Server error (${xhr.status}). Hubungi admin server.`
+          ));
+          return;
+        }
+        data = { error: xhr.statusText || 'Respons server tidak dapat dibaca' };
       }
 
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -146,15 +219,19 @@ export async function apiUpload(
         return;
       }
 
-      reject(new Error(extractApiError(data, `Upload gagal (${xhr.status})`)));
+      const errorMsg = extractApiError(data, `Upload gagal (HTTP ${xhr.status})`);
+      console.error('[API] Upload error:', endpoint, xhr.status, errorMsg, data);
+      reject(new Error(errorMsg));
     };
 
     xhr.onerror = () => {
-      reject(new Error('Tidak dapat terhubung ke server saat upload.'));
+      console.error('[API] Upload XHR network error:', endpoint);
+      reject(new Error('Koneksi terputus saat upload. Periksa koneksi internet Anda.'));
     };
 
     xhr.ontimeout = () => {
-      reject(new Error('Upload melebihi batas waktu. Silakan coba lagi.'));
+      console.error('[API] Upload timeout:', endpoint);
+      reject(new Error('Upload terlalu lama (>2 menit). Coba file yang lebih kecil atau periksa koneksi.'));
     };
 
     xhr.send(formData);
