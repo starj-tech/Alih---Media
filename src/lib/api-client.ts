@@ -38,6 +38,13 @@ const VALIDATION_MAP: Record<string, Record<string, string>> = {
   password: { 'validation.required': 'Password harus diisi', 'validation.min': 'Password minimal 6 karakter' },
   name: { 'validation.required': 'Nama harus diisi', 'validation.min': 'Nama minimal 2 karakter' },
   no_telepon: { 'validation.required': 'Nomor telepon harus diisi', 'validation.min': 'Nomor telepon minimal 10 digit' },
+  file: {
+    'validation.uploaded': 'Upload gagal di server. Sistem akan mencoba mode upload bertahap.',
+    'validation.max': 'Ukuran file melebihi batas server.',
+    'validation.required': 'File wajib diunggah',
+    'validation.mimes': 'Format file tidak sesuai',
+    'validation.mimetypes': 'Tipe file tidak didukung',
+  },
 };
 
 function translateValidationMessage(msg: string, field: string): string {
@@ -100,6 +107,28 @@ export async function apiFetch<T = any>(endpoint: string, options: RequestInit =
   return res.json();
 }
 
+type RetryableUploadError = Error & { retryWithFetch?: boolean };
+
+function createUploadError(message: string, retryWithFetch = false): RetryableUploadError {
+  const error = new Error(message) as RetryableUploadError;
+  if (retryWithFetch) error.retryWithFetch = true;
+  return error;
+}
+
+function shouldRetryUploadWithFetch(error: unknown): boolean {
+  const err = error as RetryableUploadError | null;
+  const message = (err?.message || '').toLowerCase();
+
+  return Boolean(
+    err?.retryWithFetch ||
+    message.includes('network') ||
+    message.includes('koneksi terputus') ||
+    message.includes('http 0') ||
+    message.includes('status 0') ||
+    message.includes('cors')
+  );
+}
+
 export async function apiUpload(
   endpoint: string,
   formData: FormData,
@@ -107,19 +136,76 @@ export async function apiUpload(
 ): Promise<any> {
   const token = getToken();
 
-  // Try XHR first for progress support, fall back to fetch on failure
+  // Try XHR first for progress support, then fallback to fetch for status=0/CORS/network issues
   try {
     return await apiUploadXHR(endpoint, formData, token, onProgress);
   } catch (xhrError: any) {
-    // If XHR fails with network/CORS error, try fetch as fallback
-    const isNetworkError = xhrError?.message?.includes('Koneksi terputus') || 
-                           xhrError?.message?.includes('network');
-    if (isNetworkError) {
-      console.warn('[API] XHR upload failed, trying fetch fallback:', xhrError.message);
+    if (shouldRetryUploadWithFetch(xhrError)) {
+      console.warn('[API] XHR upload failed, trying fetch fallback:', xhrError?.message || xhrError);
       return apiUploadFetch(endpoint, formData, token, onProgress);
     }
     throw xhrError;
   }
+}
+
+export async function apiUploadChunked(
+  endpoint: string,
+  file: File,
+  type: 'sertifikat' | 'ktp' | 'foto-bangunan',
+  onProgress?: (percent: number) => void,
+): Promise<any> {
+  const token = getToken();
+  const chunkSize = 512 * 1024; // 512KB per chunk
+  const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+  const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+    const start = chunkIndex * chunkSize;
+    const end = Math.min(file.size, start + chunkSize);
+    const chunk = file.slice(start, end);
+
+    const query = new URLSearchParams({
+      type,
+      upload_id: uploadId,
+      chunk_index: String(chunkIndex),
+      total_chunks: String(totalChunks),
+      file_name: file.name,
+    });
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/octet-stream',
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    let res: Response;
+    try {
+      res = await fetch(`${LARAVEL_API_URL}${endpoint}?${query.toString()}`, {
+        method: 'POST',
+        headers,
+        body: chunk,
+      });
+    } catch {
+      throw createUploadError('Tidak dapat terhubung ke server saat upload bertahap. Periksa koneksi internet.');
+    }
+
+    const data = await res.json().catch(() => ({ error: res.statusText }));
+
+    if (!res.ok) {
+      const msg = extractApiError(data, `Upload bertahap gagal (HTTP ${res.status})`);
+      throw createUploadError(msg);
+    }
+
+    onProgress?.(Math.round(((chunkIndex + 1) / totalChunks) * 100));
+
+    if (chunkIndex === totalChunks - 1) {
+      return data;
+    }
+  }
+
+  throw createUploadError('Upload bertahap gagal diselesaikan.');
 }
 
 async function apiUploadFetch(
@@ -129,7 +215,7 @@ async function apiUploadFetch(
   onProgress?: (percent: number) => void,
 ): Promise<any> {
   onProgress?.(10);
-  
+
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'X-Requested-With': 'XMLHttpRequest',
@@ -143,8 +229,8 @@ async function apiUploadFetch(
       headers,
       body: formData,
     });
-  } catch (e) {
-    throw new Error('Tidak dapat terhubung ke server untuk upload. Periksa koneksi internet.');
+  } catch {
+    throw createUploadError('Tidak dapat terhubung ke server untuk upload. Periksa koneksi internet.');
   }
 
   onProgress?.(80);
@@ -154,16 +240,16 @@ async function apiUploadFetch(
     const htmlText = await res.text().catch(() => '');
     console.error('[API] Upload fetch got HTML:', res.status, htmlText.substring(0, 200));
     if (res.status === 401 || res.status === 403) {
-      throw new Error('Sesi tidak valid. Silakan login kembali.');
+      throw createUploadError('Sesi tidak valid. Silakan login kembali.');
     }
-    throw new Error(`Upload gagal: server error (${res.status}). Hubungi admin.`);
+    throw createUploadError(`Upload gagal: server error (${res.status}). Hubungi admin.`);
   }
 
   const data = await res.json().catch(() => ({ error: res.statusText }));
 
   if (!res.ok) {
     const msg = extractApiError(data, `Upload gagal (HTTP ${res.status})`);
-    throw new Error(msg);
+    throw createUploadError(msg);
   }
 
   onProgress?.(100);
@@ -197,17 +283,21 @@ function apiUploadXHR(
     xhr.onload = () => {
       const contentType = xhr.getResponseHeader('content-type') || '';
       let data: any = null;
-      
+
+      if (xhr.status === 0) {
+        reject(createUploadError('Upload gagal (HTTP 0): koneksi terputus atau diblokir browser.', true));
+        return;
+      }
+
       try {
         data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
       } catch {
         if (contentType.includes('text/html')) {
           console.error('[API] Upload HTML response:', endpoint, xhr.status, xhr.responseText?.substring(0, 300));
-          reject(new Error(
-            xhr.status === 401 || xhr.status === 403
-              ? 'Sesi tidak valid. Silakan login kembali.'
-              : `Server error (${xhr.status}). Hubungi admin server.`
-          ));
+          const error = xhr.status === 401 || xhr.status === 403
+            ? createUploadError('Sesi tidak valid. Silakan login kembali.')
+            : createUploadError(`Server error (${xhr.status}). Hubungi admin server.`, xhr.status === 0);
+          reject(error);
           return;
         }
         data = { error: xhr.statusText || 'Respons server tidak dapat dibaca' };
@@ -221,17 +311,17 @@ function apiUploadXHR(
 
       const errorMsg = extractApiError(data, `Upload gagal (HTTP ${xhr.status})`);
       console.error('[API] Upload error:', endpoint, xhr.status, errorMsg, data);
-      reject(new Error(errorMsg));
+      reject(createUploadError(errorMsg, xhr.status === 0));
     };
 
     xhr.onerror = () => {
       console.error('[API] Upload XHR network error:', endpoint);
-      reject(new Error('Koneksi terputus saat upload. Periksa koneksi internet Anda.'));
+      reject(createUploadError('Koneksi terputus saat upload. Periksa koneksi internet Anda.', true));
     };
 
     xhr.ontimeout = () => {
       console.error('[API] Upload timeout:', endpoint);
-      reject(new Error('Upload terlalu lama (>2 menit). Coba file yang lebih kecil atau periksa koneksi.'));
+      reject(createUploadError('Upload terlalu lama (>2 menit). Coba file yang lebih kecil atau periksa koneksi.'));
     };
 
     xhr.send(formData);
