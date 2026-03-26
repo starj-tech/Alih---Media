@@ -11,6 +11,90 @@ class FileController extends Controller
     private const MAX_FILE_SIZE_BYTES = 5242880;
     private const MAX_CHUNK_SIZE_BYTES = 1048576;
 
+    private function mergeRawPayloadIntoRequest(Request $request)
+    {
+        $raw = $request->getContent();
+        if (!is_string($raw) || trim($raw) === '') {
+            $raw = @file_get_contents('php://input');
+        }
+
+        if (!is_string($raw) || trim($raw) === '') {
+            return [];
+        }
+
+        $contentType = strtolower((string) $request->header('Content-Type', ''));
+        $parsed = [];
+
+        if (strpos($contentType, 'application/json') !== false || preg_match('/^\s*\{/', $raw)) {
+            $json = json_decode($raw, true);
+            if (is_array($json)) {
+                $parsed = $json;
+            }
+        }
+
+        if (empty($parsed) && (
+            strpos($contentType, 'application/x-www-form-urlencoded') !== false
+            || strpos($contentType, 'text/plain') !== false
+            || strpos($raw, '=') !== false
+        )) {
+            parse_str($raw, $form);
+            if (is_array($form) && !empty($form)) {
+                $parsed = $form;
+            }
+        }
+
+        if (!empty($parsed)) {
+            $request->merge($parsed);
+            Log::info('[FileController] Raw payload merged into request', [
+                'content_type' => $contentType,
+                'merged_keys' => array_keys($parsed),
+            ]);
+        }
+
+        return $parsed;
+    }
+
+    private function getMergedInput(Request $request, $key, $default = null)
+    {
+        $value = $request->input($key, $request->query($key));
+        if ($value !== null && $value !== '') {
+            return $value;
+        }
+
+        $raw = $this->mergeRawPayloadIntoRequest($request);
+        if (array_key_exists($key, $raw) && $raw[$key] !== null && $raw[$key] !== '') {
+            return $raw[$key];
+        }
+
+        return $default;
+    }
+
+    private function getRequestValue(Request $request, $keys, $headers = [], $default = null)
+    {
+        $keys = is_array($keys) ? $keys : [$keys];
+        $headers = is_array($headers) ? $headers : [$headers];
+
+        foreach ($keys as $key) {
+            $value = $this->getMergedInput($request, $key);
+            if ($value !== null && $value !== '') {
+                return $value;
+            }
+        }
+
+        foreach ($headers as $header) {
+            if (!is_string($header) || $header === '') {
+                continue;
+            }
+
+            $value = $request->header($header);
+            if ($value !== null && $value !== '') {
+                return $value;
+            }
+        }
+
+        return $default;
+    }
+
     private function buildPublicFileUrl($path)
     {
         $normalized = $this->normalizeStoredPath($path);
@@ -302,10 +386,7 @@ class FileController extends Controller
 
     private function getChunkValue(Request $request, $inputKey, $headerKey)
     {
-        $value = $request->input($inputKey, $request->query($inputKey));
-        if ($value === null || $value === '') {
-            $value = $request->header($headerKey, '');
-        }
+        $value = $this->getRequestValue($request, $inputKey, $headerKey, '');
         return is_string($value) ? trim($value) : '';
     }
 
@@ -327,21 +408,69 @@ class FileController extends Controller
         return null;
     }
 
+    private function readUploadedFileBinary($file)
+    {
+        if (!$file instanceof \Illuminate\Http\UploadedFile) {
+            return null;
+        }
+
+        $paths = [];
+        $realPath = $file->getRealPath();
+        if (is_string($realPath) && $realPath !== '') {
+            $paths[] = $realPath;
+        }
+
+        $pathName = $file->getPathname();
+        if (is_string($pathName) && $pathName !== '') {
+            $paths[] = $pathName;
+        }
+
+        foreach (array_values(array_unique($paths)) as $path) {
+            if (!is_string($path) || $path === '') {
+                continue;
+            }
+
+            if (!file_exists($path) || !is_readable($path)) {
+                continue;
+            }
+
+            $content = @file_get_contents($path);
+            if (is_string($content) && $content !== '') {
+                return $content;
+            }
+        }
+
+        return null;
+    }
+
     private function readChunkBinary(Request $request)
     {
+        $this->mergeRawPayloadIntoRequest($request);
         $contentType = strtolower((string) $request->header('Content-Type', ''));
 
         // Priority 0: multipart file upload (most reliable on shared hosting)
-        if ($request->hasFile('chunk')) {
-            $chunk = $request->file('chunk');
-            if ($chunk && $chunk->isValid()) {
-                $content = @file_get_contents($chunk->getRealPath());
-                if (is_string($content) && $content !== '') {
-                    Log::info('[FileController] Chunk read via multipart file (' . strlen($content) . ' bytes)');
-                    return $content;
+        $chunk = $request->file('chunk');
+        if (!$chunk) {
+            $chunk = $this->extractFirstUploadedFile($request->allFiles());
+        }
+
+        if ($chunk instanceof \Illuminate\Http\UploadedFile) {
+            $content = $this->readUploadedFileBinary($chunk);
+            if (is_string($content) && $content !== '') {
+                if (!$chunk->isValid()) {
+                    Log::warning('[FileController] Chunk upload marked invalid by PHP but binary was recovered', [
+                        'error_code' => $chunk->getError(),
+                        'client_name' => $chunk->getClientOriginalName(),
+                    ]);
                 }
+                Log::info('[FileController] Chunk read via multipart file (' . strlen($content) . ' bytes)');
+                return $content;
             }
-            Log::warning('[FileController] multipart chunk file present but empty/invalid');
+
+            Log::warning('[FileController] multipart chunk file present but unreadable', [
+                'error_code' => $chunk->getError(),
+                'client_name' => $chunk->getClientOriginalName(),
+            ]);
         }
 
         // Priority 1: text/plain body → treat as raw base64 string
@@ -362,7 +491,7 @@ class FileController extends Controller
         }
 
         // Priority 2: Base64 in body (JSON or form-encoded)
-        $b64 = $request->input('chunk_base64', $request->input('chunkBase64'));
+        $b64 = $this->getRequestValue($request, ['chunk_base64', 'chunkBase64'], 'X-Chunk-Base64');
         if (is_string($b64) && trim($b64) !== '') {
             $clean = preg_replace('/^data:[^;]+;base64,/', '', trim($b64));
             $decoded = base64_decode(str_replace(' ', '+', $clean), true);
@@ -446,15 +575,24 @@ class FileController extends Controller
 
     public function upload(Request $request)
     {
-        $request->validate(['type' => 'required|in:sertifikat,ktp,foto-bangunan']);
+        $this->mergeRawPayloadIntoRequest($request);
 
         $user = $request->user();
         if (!$user) return $this->errorResponse('Unauthorized', 401, 'auth_missing');
 
-        $type = (string) $request->input('type');
+        $type = (string) $this->getRequestValue($request, 'type', 'X-Upload-Type', '');
+        if (!in_array($type, ['sertifikat', 'ktp', 'foto-bangunan'], true)) {
+            Log::warning('[FileController] Upload type missing or invalid after payload merge', [
+                'content_type' => $request->header('Content-Type'),
+                'content_length' => $request->header('Content-Length'),
+                'input_keys' => array_keys($request->all()),
+                'file_keys' => array_keys($request->allFiles()),
+            ]);
+            return $this->errorResponse('Tipe file wajib diisi', 422, 'invalid_type');
+        }
 
-        $fileBase64 = $request->input('file_base64');
-        $fileNameFromBody = basename((string) $request->input('file_name', 'upload.bin'));
+        $fileBase64 = $this->getRequestValue($request, ['file_base64', 'fileBase64']);
+        $fileNameFromBody = basename((string) $this->getRequestValue($request, ['file_name', 'fileName'], 'X-File-Name', 'upload.bin'));
 
         if (is_string($fileBase64) && trim($fileBase64) !== '') {
             $clean = preg_replace('/^data:[^;]+;base64,/', '', trim($fileBase64));
@@ -505,22 +643,32 @@ class FileController extends Controller
             return $this->errorResponse('File wajib diunggah', 422, 'file_required');
         }
 
-        if (!$file || !$file->isValid()) {
-            return $this->errorResponse('Upload gagal di server. Gunakan upload bertahap.', 500, 'upload_transport_failed');
-        }
-
-        if (($file->getSize() ?: 0) > self::MAX_FILE_SIZE_BYTES) {
-            return $this->errorResponse('Ukuran file maksimal 5MB', 422, 'file_too_large');
-        }
-
         $ext = strtolower($file->getClientOriginalExtension());
         $typeErr = $this->validateTypeAndExtension($type, $ext);
         if ($typeErr) return $this->errorResponse($typeErr, 422, 'invalid_file_type');
 
         try {
-            $content = @file_get_contents($file->getRealPath());
+            $content = $this->readUploadedFileBinary($file);
             if (!is_string($content) || $content === '') {
+                Log::warning('[FileController] Standard upload unreadable', [
+                    'error_code' => $file->getError(),
+                    'is_valid' => $file->isValid(),
+                    'client_name' => $file->getClientOriginalName(),
+                    'client_mime' => $file->getClientMimeType(),
+                    'reported_size' => $file->getSize(),
+                ]);
                 return $this->errorResponse('Upload gagal di server. File tidak dapat dibaca.', 500, 'upload_transport_failed');
+            }
+
+            if (strlen($content) > self::MAX_FILE_SIZE_BYTES) {
+                return $this->errorResponse('Ukuran file maksimal 5MB', 422, 'file_too_large');
+            }
+
+            if (!$file->isValid()) {
+                Log::warning('[FileController] Standard upload marked invalid by PHP but binary was recovered', [
+                    'error_code' => $file->getError(),
+                    'client_name' => $file->getClientOriginalName(),
+                ]);
             }
 
             $stored = $this->storeBinaryToPublicDisk($user->id, $type, $ext, $content);
@@ -537,6 +685,8 @@ class FileController extends Controller
 
     public function uploadChunk(Request $request)
     {
+        $this->mergeRawPayloadIntoRequest($request);
+
         $user = $request->user();
         if (!$user) return $this->errorResponse('Unauthorized', 401, 'auth_missing');
 
