@@ -56,7 +56,7 @@ function getMenu(role: UserRole): MenuItem[] {
         { label: 'Arsip Verifikasi BT/SU', path: '/admin/arsip-verifikasi', icon: Archive },
         { label: 'Validasi SU & Bidang', path: '/admin/validasi-su', icon: FileSearch },
         { label: 'Validasi Buku Tanah', path: '/admin/validasi-bt', icon: CheckSquare },
-        { label: 'Informasi Alihmedia', path: '/admin/informasi', icon: Info },
+        { label: 'Informasi Berkas', path: '/admin/informasi', icon: Info },
         { label: 'Kelola User', path: '/admin/users', icon: Users },
         { label: 'Bantuan', path: '/admin/bantuan', icon: HelpCircle },
       ];
@@ -66,7 +66,7 @@ function getMenu(role: UserRole): MenuItem[] {
         { label: 'Arsip Verifikasi BT/SU', path: '/admin/arsip-verifikasi', icon: Archive },
         { label: 'Validasi SU & Bidang', path: '/admin/validasi-su', icon: FileSearch },
         { label: 'Validasi Buku Tanah', path: '/admin/validasi-bt', icon: CheckSquare },
-        { label: 'Informasi Alihmedia', path: '/admin/informasi', icon: Info },
+        { label: 'Informasi Berkas', path: '/admin/informasi', icon: Info },
         { label: 'Kelola User', path: '/admin/users', icon: Users },
         { label: 'Bantuan', path: '/admin/bantuan', icon: HelpCircle },
       ];
@@ -74,21 +74,21 @@ function getMenu(role: UserRole): MenuItem[] {
       return [
         { label: 'Dashboard', path: '/admin/dashboard', icon: LayoutDashboard },
         { label: 'Arsip Verifikasi BT/SU', path: '/admin/arsip-verifikasi', icon: Archive },
-        { label: 'Informasi Alihmedia', path: '/admin/informasi', icon: Info },
+        { label: 'Informasi Berkas', path: '/admin/informasi', icon: Info },
         { label: 'Bantuan', path: '/admin/bantuan', icon: HelpCircle },
       ];
     case 'admin_validasi_su':
       return [
         { label: 'Dashboard', path: '/admin/dashboard', icon: LayoutDashboard },
         { label: 'Validasi SU & Bidang', path: '/admin/validasi-su', icon: FileSearch },
-        { label: 'Informasi Alihmedia', path: '/admin/informasi', icon: Info },
+        { label: 'Informasi Berkas', path: '/admin/informasi', icon: Info },
         { label: 'Bantuan', path: '/admin/bantuan', icon: HelpCircle },
       ];
     case 'admin_validasi_bt':
       return [
         { label: 'Dashboard', path: '/admin/dashboard', icon: LayoutDashboard },
         { label: 'Validasi Buku Tanah', path: '/admin/validasi-bt', icon: CheckSquare },
-        { label: 'Informasi Alihmedia', path: '/admin/informasi', icon: Info },
+        { label: 'Informasi Berkas', path: '/admin/informasi', icon: Info },
         { label: 'Bantuan', path: '/admin/bantuan', icon: HelpCircle },
       ];
     case 'user':
@@ -96,8 +96,8 @@ function getMenu(role: UserRole): MenuItem[] {
     default:
       return [
         { label: 'Dashboard', path: '/user/dashboard', icon: LayoutDashboard },
-        { label: 'Pengajuan Alihmedia', path: '/user/pengajuan', icon: Send },
-        { label: 'Informasi Alihmedia', path: '/user/informasi', icon: Info },
+        { label: 'Pengajuan Berkas', path: '/user/pengajuan', icon: Send },
+        { label: 'Informasi Berkas', path: '/user/informasi', icon: Info },
         { label: 'Bantuan', path: '/user/bantuan', icon: HelpCircle },
       ];
   }
@@ -163,11 +163,14 @@ export default function AppSidebar({
   return (
     <>
       {isMobile && mobileOpen && (
-        <button
-          type="button"
+        <div
+          role="button"
+          tabIndex={-1}
           aria-label="Tutup menu"
           onClick={onCloseMobile}
+          onTouchEnd={(e) => { e.preventDefault(); onCloseMobile(); }}
           className="fixed inset-0 z-40 bg-[hsl(var(--foreground))]/35 backdrop-blur-[1px]"
+          style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
         />
       )}
 
@@ -196,8 +199,10 @@ export default function AppSidebar({
           <button
             type="button"
             onClick={isMobile ? onCloseMobile : onToggleCollapse}
+            onTouchEnd={(e) => { e.preventDefault(); (isMobile ? onCloseMobile : onToggleCollapse)(); }}
             className="rounded-md p-2 text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-accent))] hover:text-[hsl(var(--sidebar-accent-foreground))]"
             aria-label={isMobile ? 'Tutup menu' : collapsed ? 'Buka menu' : 'Collapse menu'}
+            style={{ touchAction: 'manipulation', WebkitTapHighlightColor: 'transparent' }}
           >
             {isMobile ? <X className="h-4 w-4" /> : collapsed ? <ChevronsRight className="h-4 w-4" /> : <ChevronsLeft className="h-4 w-4" />}
           </button>
@@ -247,8 +252,9 @@ export default function AppSidebar({
 
         {(!collapsed || isMobile) && (
           <div className="border-t border-[hsl(var(--sidebar-border))] px-4 py-3">
-            <p className="text-center text-[10px] uppercase tracking-widest text-[hsl(var(--sidebar-foreground))] opacity-45">Alih Media</p>
-            <p className="text-center text-[10px] text-[hsl(var(--sidebar-foreground))] opacity-45">Kantah Kab. Bogor II</p>
+            <p className="text-center text-[10px] uppercase tracking-widest text-[hsl(var(--sidebar-foreground))] opacity-45">VISA</p>
+            <p className="text-center text-[10px] text-[hsl(var(--sidebar-foreground))] opacity-45">Validasi Instrumen Sertifikat Analog</p>
+            <p className="text-center text-[10px] text-[hsl(var(--sidebar-foreground))] opacity-45">Kantor Pertanahan Kab. Bogor II</p>
           </div>
         )}
 
